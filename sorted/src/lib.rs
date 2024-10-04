@@ -68,12 +68,12 @@ impl VisitMut for ExprMatchVisitor {
         {
             i.attrs.remove(attr);
 
-            let _ = i.arms.iter().enumerate().try_fold(
-                ((), None::<Vec<Ident>>),
-                |(_, prev), (index, arm)| {
+            let pats = i
+                .arms
+                .iter()
+                .map(|arm| {
                     let pat = &arm.pat;
                     let span: &dyn ToTokens;
-                    // eprintln!("pat: {:#?}", pat);
 
                     let paths = match pat {
                         Pat::Ident(p) => {
@@ -93,60 +93,63 @@ impl VisitMut for ExprMatchVisitor {
                                 .collect::<Vec<_>>()
                         }
 
-                        Pat::Wild(_) => {
-                            if index != i.arms.len() - 1 {
+                        Pat::Wild(p) => {
+                            span = p;
+                            vec![Ident::new(
+                                &p.underscore_token.to_token_stream().to_string(),
+                                p.span(),
+                            )]
+                        }
+
+                        pat => {
+                            return Err(syn::Error::new_spanned(pat, "unsupported by #[sorted]"));
+                        }
+                    };
+
+                    Ok((paths, span))
+                })
+                .collect::<syn::Result<Vec<_>>>();
+
+            match pats {
+                Ok(pats) => {
+                    let mut pats_sorted = pats.clone();
+                    pats_sorted.sort_by(|(paths1, _), (paths2, _)| paths1.cmp(paths2));
+
+                    let _ = pats
+                        .iter()
+                        .zip(pats_sorted.iter())
+                        .try_for_each(|(p1, p2)| {
+                            if p1.0 != p2.0 {
                                 if self.error.is_none() {
                                     self.error = Some(syn::Error::new_spanned(
-                                        pat,
-                                        "wildcard pattern should be present the last one",
+                                        p2.1,
+                                        format!(
+                                            "{} should sort before {}",
+                                            p2.0.iter()
+                                                .map(|p| p.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join("::"),
+                                            p1.0.iter()
+                                                .map(|p| p.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join("::"),
+                                        ),
                                     ));
                                 }
 
                                 return Err(());
                             }
 
-                            return Ok(((), prev));
-                        }
-
-                        pat => {
-                            if self.error.is_none() {
-                                self.error =
-                                    Some(syn::Error::new_spanned(pat, "unsupported by #[sorted]"));
-                            }
-
-                            return Err(());
-                        }
-                    };
-
-                    if let Some(prev) = &prev {
-                        #[allow(clippy::collapsible_if)]
-                        if prev > &paths {
-                            if self.error.is_none() {
-                                self.error = Some(syn::Error::new_spanned(
-                                    span,
-                                    format!(
-                                        "{} should sort before {}",
-                                        paths
-                                            .iter()
-                                            .map(|p| p.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join("::"),
-                                        prev.iter()
-                                            .map(|p| p.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join("::"),
-                                    ),
-                                ));
-                            }
-
-                            return Err(());
-                        }
+                            Ok(())
+                        });
+                }
+                Err(err) => {
+                    if self.error.is_none() {
+                        self.error = Some(err);
                     }
-
-                    Ok(((), Some(paths)))
-                },
-            );
-        };
+                }
+            };
+        }
 
         visit_mut::visit_expr_match_mut(self, i);
     }
